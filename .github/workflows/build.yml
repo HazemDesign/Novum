@@ -1,0 +1,100 @@
+name: Build Novum
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'optixBranch/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build-main:
+    name: Main engine (no OptiX needed)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Install CUDA 12.8.1
+        uses: Jimver/cuda-toolkit@v0.2.24
+        with:
+          cuda: '12.8.1'
+          method: 'network'
+
+      - name: Show versions
+        run: |
+          cmake --version
+          nvcc --version
+
+      - name: Configure main
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CUDA_ARCHITECTURES=89"
+
+      - name: Build main
+        run: cmake --build build --config Release -j 2
+
+      - name: Upload NovumRender
+        uses: actions/upload-artifact@v4
+        with:
+          name: NovumRender-sm89
+          path: build/Release/NovumRender.exe
+          if-no-files-found: error
+
+  build-optix:
+    name: OptiX branch (needs OptiX SDK)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Install CUDA 12.8.1
+        uses: Jimver/cuda-toolkit@v0.2.24
+        with:
+          cuda: '12.8.1'
+          method: 'network'
+
+      # OptiX 9.1.0 cannot be downloaded anonymously (NVIDIA login required).
+      # Upload it once to your fork as a release asset named optix-sdk-9.1.0.zip
+      # containing the SDK "include/" folder, e.g.:
+      #   gh release create optix-sdk --title "OptiX SDK" --notes "private"
+      #   gh release upload optix-sdk C:\path\to\optix-sdk-9.1.0.zip
+      - name: Try download OptiX SDK from private release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download optix-sdk -p "optix-sdk-9.1.0.zip" --clobber
+
+      - name: Unpack OptiX SDK
+        run: |
+          if (Test-Path optix-sdk-9.1.0.zip) {
+            Expand-Archive optix-sdk-9.1.0.zip -DestinationPath C:\optix-sdk
+            Get-ChildItem C:\optix-sdk -Recurse -Depth 2 | Select-Object FullName
+          } else {
+            Write-Host "::warning::No optix-sdk-9.1.0.zip found. Upload it as a release asset to build the OptiX branch."
+            exit 1
+          }
+
+      - name: Configure OptiX (RTX 5050 = sm_120)
+        run: >
+          cmake -S optixBranch -B build-optix
+          -DCMAKE_BUILD_TYPE=Release
+          "-DCMAKE_CUDA_ARCHITECTURES=120"
+          "-DOPTIX_INCLUDE_DIR=C:/optix-sdk/include"
+          -DUSE_OPTIX_IR=ON
+
+      - name: Build OptiX
+        run: cmake --build build-optix --config Release -j 2
+
+      - name: Upload renderer_optix
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderer_optix-sm120
+          path: |
+            build-optix/Release/renderer_optix.exe
+            build-optix/Release/*.optixir
+            build-optix/Release/*.ptx
+          if-no-files-found: error
